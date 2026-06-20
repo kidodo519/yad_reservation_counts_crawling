@@ -30,6 +30,16 @@ settings:
   driver_path: C:\Users\kidokoro\Desktop\Program\Python\chromedriver-win32\chromedriver.exe
   csv_download: false
   db_import: true
+  headless: true
+  diagnostics:
+    # true にすると crawler.log と、取得失敗時の HTML/スクリーンショットを output_dir に保存します
+    enabled: false
+    # 相対パスの場合は exe/config.yaml と同じディレクトリ配下に作成されます
+    output_dir: diagnostics
+    save_html: true
+    save_screenshot: true
+    # true にすると成功時も HTML/スクリーンショットを保存します（ファイル数が多くなります）
+    save_on_success: false
 
 webhook:
   success:

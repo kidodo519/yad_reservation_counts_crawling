@@ -64,3 +64,24 @@ cd dist
 ./yad_reservation_count_crawling
 ```
 
+## 診断ログの取得
+
+EC2 やタスクスケジューラー実行時に取得件数が不安定な場合は、`config.yaml` の `settings.diagnostics.enabled` を `true` にすると、exe と同じディレクトリ配下（既定は `diagnostics/`）に以下を保存できます。
+
+- `crawler.log`: 標準出力/標準エラーに出た実行ログ
+- `*.html`: 宿件数が取得できないページ、アクセス制限が疑われるページ、予約数が取得できない遷移先ページ
+- `*.png`: Selenium で予約数が取得できない遷移先画面のスクリーンショット
+
+設定例:
+
+```yaml
+settings:
+  diagnostics:
+    enabled: true
+    output_dir: diagnostics
+    save_html: true
+    save_screenshot: true
+    save_on_success: false
+```
+
+`save_on_success: true` にすると成功時の HTML/スクリーンショットも保存しますが、対象宿数に応じてファイル数が多くなります。通常は `false` のまま、失敗時のみ保存する運用を推奨します。
