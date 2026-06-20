@@ -16,11 +16,38 @@ import traceback
 import csv
 from urllib.parse import urlparse, parse_qs
 import re
+import logging
+from logging.handlers import RotatingFileHandler
 
 DEFAULT_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
 }
+
+logger = logging.getLogger('yad_reservation_count_crawling')
+diagnostics_context = {
+    'enabled': False,
+    'output_dir': None,
+    'save_html': False,
+    'save_screenshot': False,
+    'save_on_success': False,
+}
+
+
+class StreamToLogger:
+    def __init__(self, stream, log_method):
+        self.stream = stream
+        self.log_method = log_method
+
+    def write(self, message):
+        self.stream.write(message)
+        self.stream.flush()
+        for line in message.rstrip().splitlines():
+            if line:
+                self.log_method(line)
+
+    def flush(self):
+        self.stream.flush()
 
 def remove_between_strings(input_string, start_string, end_string):
     start_index = str(input_string).find(start_string)
@@ -30,7 +57,7 @@ def remove_between_strings(input_string, start_string, end_string):
         return output_string
     else:
         return input_string
-    
+
 
 def mid(text, n, m):
         return text[n-1:n+m-1]
@@ -49,7 +76,7 @@ def make_record_from_row(row, mapping):
     ret = {}
     for db_key, csv_key in mapping['mappings']['reservation_counts']['string'].items():
         v = row[csv_key].strip()
-        ret[db_key] = v if v != '' else None    
+        ret[db_key] = v if v != '' else None
 
     for db_key, csv_key in mapping['mappings']['reservation_counts']['integer'].items():
         v = row[csv_key]
@@ -71,7 +98,83 @@ def build_session(config):
     return session
 
 
-def fetch_soup(session, url):
+def safe_filename(value, max_length=120):
+    safe_value = re.sub(r'[^0-9A-Za-z._-]+', '_', str(value)).strip('_')
+    return safe_value[:max_length] if safe_value else 'unknown'
+
+
+def setup_diagnostics(base_path, config):
+    diagnostics_config = config.get('settings', {}).get('diagnostics', {})
+    enabled = bool(diagnostics_config.get('enabled', False))
+    output_dir = diagnostics_config.get('output_dir', 'diagnostics')
+    if not os.path.isabs(output_dir):
+        output_dir = os.path.join(base_path, output_dir)
+
+    diagnostics_context.update({
+        'enabled': enabled,
+        'output_dir': output_dir,
+        'save_html': bool(diagnostics_config.get('save_html', True)),
+        'save_screenshot': bool(diagnostics_config.get('save_screenshot', True)),
+        'save_on_success': bool(diagnostics_config.get('save_on_success', False)),
+    })
+
+    if not enabled:
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, 'crawler.log')
+
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    handler = RotatingFileHandler(log_path, maxBytes=5 * 1024 * 1024, backupCount=5, encoding='utf-8')
+    handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+    logger.addHandler(handler)
+
+    sys.stdout = StreamToLogger(sys.stdout, logger.info)
+    sys.stderr = StreamToLogger(sys.stderr, logger.error)
+    print('診断ログ出力先: ' + log_path)
+
+
+def write_diagnostic_file(prefix, extension, content, binary=False):
+    if not diagnostics_context['enabled'] or diagnostics_context['output_dir'] is None:
+        return None
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    filename = f'{timestamp}_{safe_filename(prefix)}.{extension}'
+    path = os.path.join(diagnostics_context['output_dir'], filename)
+    mode = 'wb' if binary else 'w'
+    if binary:
+        with open(path, mode) as fp:
+            fp.write(content)
+    else:
+        with open(path, mode, encoding='utf-8') as fp:
+            fp.write(content)
+    print('診断ファイル保存: ' + path)
+    return path
+
+
+def save_soup_diagnostics(soup, label, force=False):
+    if not diagnostics_context['enabled'] or not diagnostics_context['save_html']:
+        return
+    if not force and not diagnostics_context['save_on_success']:
+        return
+    write_diagnostic_file(label, 'html', str(soup))
+
+
+def save_driver_diagnostics(driver, label, force=False):
+    if not diagnostics_context['enabled']:
+        return
+    if not force and not diagnostics_context['save_on_success']:
+        return
+    print('診断情報: current_url=' + str(driver.current_url))
+    print('診断情報: title=' + str(driver.title))
+    if diagnostics_context['save_html']:
+        write_diagnostic_file(label, 'html', driver.page_source)
+    if diagnostics_context['save_screenshot']:
+        screenshot = driver.get_screenshot_as_png()
+        write_diagnostic_file(label, 'png', screenshot, binary=True)
+
+
+def fetch_soup(session, url, label=None):
     response = session.get(url, timeout=30)
     response.raise_for_status()
     soup = BeautifulSoup(response.content, "html.parser")
@@ -81,6 +184,9 @@ def fetch_soup(session, url):
         print('警告: アクセス制限の可能性があります')
         print('URL: ' + url)
         print('title: ' + title)
+        save_soup_diagnostics(soup, label or 'access_restricted', force=True)
+    else:
+        save_soup_diagnostics(soup, label or 'request', force=False)
     return soup
 
 
@@ -218,6 +324,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding = 'utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding = 'utf-8')
 
 base_path, config = load_config()
+setup_diagnostics(base_path, config)
 
 
 today_date = str(datetime.date.today())
@@ -241,7 +348,7 @@ for target in targets:
         area_name = target['area_name']
         print('エリアCD: ' + str(area_code))
         mainURL = f'https://www.jalan.net/{prefecture_code}/LRG_{area_code}/?stayYear=&stayMonth=&stayDay=&dateUndecided=1&stayCount=1&roomCount=1&adultNum=2&ypFlg=1&kenCd={prefecture_code}&screenId=UWW1380&roomCrack=200000&lrgCd={area_code}&distCd=01&rootCd=04&yadRk=1&yadHb=1'
-        soup = fetch_soup(session, mainURL)
+        soup = fetch_soup(session, mainURL, f'area_{prefecture_code}_{area_code}_main')
         yado_count, yado_count_text = extract_yado_count(soup)
         if yado_count > 0:
                 page_count = math.ceil(yado_count / 30)
@@ -250,7 +357,7 @@ for target in targets:
                 #ページごとに宿番号取得
                 for i in range(1, page_count+1):
                         page_URL = f'https://www.jalan.net/{prefecture_code}/LRG_{area_code}/page{i}.html?screenId=UWW1402&distCd=01&activeSort=0&mvTabFlg=1&rootCd=04&stayYear=&stayMonth=&stayDay=&stayCount=1&roomCount=1&dateUndecided=1&adultNum=2&roomCrack=200000&kenCd={prefecture_code}&lrgCd={area_code}&vosFlg=6&idx={(i-1)*30}&yadRk=1&yadHb=1'
-                        soup_page = fetch_soup(session, page_URL)
+                        soup_page = fetch_soup(session, page_URL, f'area_{prefecture_code}_{area_code}_page_{i}')
                         elems_yad_num = soup_page.find_all(class_='jlnpc-yadoCassette__link')
                         elems_yad_name = soup_page.find_all('h2', class_='p-searchResultItem__facilityName')
                         elems_yad_url = soup_page.find_all(class_='p-searchResultItem__planName')
@@ -294,6 +401,7 @@ for target in targets:
                 print('対象エリアCD: ' + str(area_code))
                 print('title: ' + page_title)
                 print('preview: ' + page_preview)
+                save_soup_diagnostics(soup, f'area_{prefecture_code}_{area_code}_count_not_found', force=True)
 print('宿番号' + str(len(yado_number)) + '件取得終了')
 print('------------------------------------------------')
 
@@ -339,9 +447,12 @@ for cryn in yado_number:
         try:
                 number_element = driver.find_element(By.CSS_SELECTOR, "li.jlnpc-yado__notify--inn-reserved em")
                 print(f"取得成功: 予約数 {number_element.text.strip()} 名")
+                save_driver_diagnostics(driver, f'reservation_{yad_number}_{plan_code}_{room_code}_success', force=False)
         except Exception as e:
                 number_element = None
                 print("予約数が取得できませんでした")
+                print('診断情報: yad_number=' + str(yad_number) + ' plan_code=' + str(plan_code) + ' room_code=' + str(room_code))
+                save_driver_diagnostics(driver, f'reservation_{yad_number}_{plan_code}_{room_code}_not_found', force=True)
 
         reservation_count = 0
         if number_element is not None:
@@ -392,11 +503,11 @@ if config['settings']['db_import']:
                 cursor = conn.cursor()
                 buf = []
                 for row in res_count:
-                        record = make_record_from_row(row, config)         
+                        record = make_record_from_row(row, config)
                         buf.append([record[k] for k in ordered_keys])
-                        
+
                 extras.execute_values(cursor, table_insert_query, buf)
-                conn.commit()           
+                conn.commit()
                 post_webhook(config, f'予約数クローリング: DBにインポートしました。 (レコード数: {n_records})', 'success')
 
         except Exception as ex:
