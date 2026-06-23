@@ -18,6 +18,7 @@ from urllib.parse import urlparse, parse_qs
 import re
 import logging
 from logging.handlers import RotatingFileHandler
+import time
 
 DEFAULT_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -172,6 +173,61 @@ def save_driver_diagnostics(driver, label, force=False):
     if diagnostics_context['save_screenshot']:
         screenshot = driver.get_screenshot_as_png()
         write_diagnostic_file(label, 'png', screenshot, binary=True)
+
+
+def get_setting_number(config, key, default):
+    value = config.get('settings', {}).get(key, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        print(f'警告: settings.{key} が数値ではないため既定値 {default} を使用します: {value}')
+        return float(default)
+
+
+def wait_before_access(config):
+    interval_seconds = get_setting_number(config, 'access_interval_seconds', 5)
+    if interval_seconds > 0:
+        print('アクセス間隔待機: ' + str(interval_seconds) + '秒')
+        time.sleep(interval_seconds)
+
+
+def build_chrome_options(config):
+    options = Options()
+    if config.get('settings', {}).get('headless', True):
+        options.add_argument('--headless=new')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    return options
+
+
+def create_driver(config):
+    driver_path = config['settings']['driver_path']
+    return webdriver.Chrome(service=ChromeService(driver_path), options=build_chrome_options(config))
+
+
+def fetch_soup_with_new_window(config, url, label=None):
+    wait_before_access(config)
+    driver = create_driver(config)
+    try:
+        driver.get(url)
+        page_load_wait_seconds = get_setting_number(config, 'page_load_wait_seconds', 3)
+        if page_load_wait_seconds > 0:
+            print('ページ表示待機: ' + str(page_load_wait_seconds) + '秒')
+            time.sleep(page_load_wait_seconds)
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        title = soup.title.get_text(strip=True) if soup.title else ''
+        page_text = soup.get_text(" ", strip=True)
+        if any(k in page_text for k in ['アクセスを制限', '不正アクセス', 'Access Denied', 'captcha', 'reCAPTCHA', 'ただいまアクセスしにくい状況']):
+            print('警告: アクセス制限または混雑ページの可能性があります')
+            print('URL: ' + url)
+            print('title: ' + title)
+            save_driver_diagnostics(driver, label or 'access_restricted', force=True)
+        else:
+            save_driver_diagnostics(driver, label or 'browser_request', force=False)
+        return soup
+    finally:
+        driver.quit()
 
 
 def fetch_soup(session, url, label=None):
@@ -335,8 +391,6 @@ yado_seen = set()
 yad_plan_map = {}
 res_count = []
 
-session = build_session(config)
-
 #ページ数取得
 print('宿番号取得開始')
 targets = build_prefecture_area_targets(config)
@@ -348,7 +402,7 @@ for target in targets:
         area_name = target['area_name']
         print('エリアCD: ' + str(area_code))
         mainURL = f'https://www.jalan.net/{prefecture_code}/LRG_{area_code}/?stayYear=&stayMonth=&stayDay=&dateUndecided=1&stayCount=1&roomCount=1&adultNum=2&ypFlg=1&kenCd={prefecture_code}&screenId=UWW1380&roomCrack=200000&lrgCd={area_code}&distCd=01&rootCd=04&yadRk=1&yadHb=1'
-        soup = fetch_soup(session, mainURL, f'area_{prefecture_code}_{area_code}_main')
+        soup = fetch_soup_with_new_window(config, mainURL, f'area_{prefecture_code}_{area_code}_main')
         yado_count, yado_count_text = extract_yado_count(soup)
         if yado_count > 0:
                 page_count = math.ceil(yado_count / 30)
@@ -357,7 +411,7 @@ for target in targets:
                 #ページごとに宿番号取得
                 for i in range(1, page_count+1):
                         page_URL = f'https://www.jalan.net/{prefecture_code}/LRG_{area_code}/page{i}.html?screenId=UWW1402&distCd=01&activeSort=0&mvTabFlg=1&rootCd=04&stayYear=&stayMonth=&stayDay=&stayCount=1&roomCount=1&dateUndecided=1&adultNum=2&roomCrack=200000&kenCd={prefecture_code}&lrgCd={area_code}&vosFlg=6&idx={(i-1)*30}&yadRk=1&yadHb=1'
-                        soup_page = fetch_soup(session, page_URL, f'area_{prefecture_code}_{area_code}_page_{i}')
+                        soup_page = fetch_soup_with_new_window(config, page_URL, f'area_{prefecture_code}_{area_code}_page_{i}')
                         elems_yad_num = soup_page.find_all(class_='jlnpc-yadoCassette__link')
                         elems_yad_name = soup_page.find_all('h2', class_='p-searchResultItem__facilityName')
                         elems_yad_url = soup_page.find_all(class_='p-searchResultItem__planName')
@@ -419,16 +473,6 @@ print('プラン/部屋タイプ未取得件数: ' + str(missing_plan_count))
 
 print('予約件数取得開始')
 
-driver_path = config['settings']['driver_path']
-options = Options()
-if config.get('settings', {}).get('headless', True):
-        options.add_argument('--headless=new')
-options.add_argument('--no-sandbox')
-options.add_argument('--disable-dev-shm-usage')
-options.add_argument('--disable-gpu')
-driver = webdriver.Chrome(service=ChromeService(driver_path), options=options)
-# driver.maximize_window()
-
 for cryn in yado_number:
         yad_number = normalize_code(cryn['宿番号'], 6)
         plan_code = normalize_code(cryn['プランCD'], 8)
@@ -441,18 +485,27 @@ for cryn in yado_number:
         print('room_code: ' + str(room_code))
 
         rc_URL = f'https://www.jalan.net/uw/uwp3200/uww3201init.do?roomCrack=200000&stayYear=&stayMonth=&stayDay=&roomCount=1&adultNum=2&rootCd=04&distCd=01&stayCount=1&screenId=UWW1402&yadNo={yad_number}&planCd={plan_code}&roomTypeCd={room_code}&pageListNumPlan=44_1_1_1&callbackHistFlg=1&ccnt=yadlist_cp_n_0_sale_n_0_pp_n_0'
-        driver.get(rc_URL)
-        driver.implicitly_wait(3)
-
+        wait_before_access(config)
+        driver = create_driver(config)
         try:
-                number_element = driver.find_element(By.CSS_SELECTOR, "li.jlnpc-yado__notify--inn-reserved em")
-                print(f"取得成功: 予約数 {number_element.text.strip()} 名")
-                save_driver_diagnostics(driver, f'reservation_{yad_number}_{plan_code}_{room_code}_success', force=False)
-        except Exception as e:
-                number_element = None
-                print("予約数が取得できませんでした")
-                print('診断情報: yad_number=' + str(yad_number) + ' plan_code=' + str(plan_code) + ' room_code=' + str(room_code))
-                save_driver_diagnostics(driver, f'reservation_{yad_number}_{plan_code}_{room_code}_not_found', force=True)
+                driver.get(rc_URL)
+                page_load_wait_seconds = get_setting_number(config, 'page_load_wait_seconds', 3)
+                if page_load_wait_seconds > 0:
+                        print('ページ表示待機: ' + str(page_load_wait_seconds) + '秒')
+                        time.sleep(page_load_wait_seconds)
+                driver.implicitly_wait(3)
+
+                try:
+                        number_element = driver.find_element(By.CSS_SELECTOR, "li.jlnpc-yado__notify--inn-reserved em")
+                        print(f"取得成功: 予約数 {number_element.text.strip()} 名")
+                        save_driver_diagnostics(driver, f'reservation_{yad_number}_{plan_code}_{room_code}_success', force=False)
+                except Exception as e:
+                        number_element = None
+                        print("予約数が取得できませんでした")
+                        print('診断情報: yad_number=' + str(yad_number) + ' plan_code=' + str(plan_code) + ' room_code=' + str(room_code))
+                        save_driver_diagnostics(driver, f'reservation_{yad_number}_{plan_code}_{room_code}_not_found', force=True)
+        finally:
+                driver.quit()
 
         reservation_count = 0
         if number_element is not None:
@@ -463,8 +516,6 @@ for cryn in yado_number:
 
                 if d['予約件数'] is not None:
                         res_count.append(d)
-
-driver.quit()
 
 n_records = len(res_count)
 
