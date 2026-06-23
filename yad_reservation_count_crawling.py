@@ -487,6 +487,7 @@ for cryn in yado_number:
         rc_URL = f'https://www.jalan.net/uw/uwp3200/uww3201init.do?roomCrack=200000&stayYear=&stayMonth=&stayDay=&roomCount=1&adultNum=2&rootCd=04&distCd=01&stayCount=1&screenId=UWW1402&yadNo={yad_number}&planCd={plan_code}&roomTypeCd={room_code}&pageListNumPlan=44_1_1_1&callbackHistFlg=1&ccnt=yadlist_cp_n_0_sale_n_0_pp_n_0'
         wait_before_access(config)
         driver = create_driver(config)
+        reservation_count = None
         try:
                 driver.get(rc_URL)
                 page_load_wait_seconds = get_setting_number(config, 'page_load_wait_seconds', 3)
@@ -497,20 +498,17 @@ for cryn in yado_number:
 
                 try:
                         number_element = driver.find_element(By.CSS_SELECTOR, "li.jlnpc-yado__notify--inn-reserved em")
-                        print(f"取得成功: 予約数 {number_element.text.strip()} 名")
+                        reservation_count = number_element.text.strip()
+                        print(f"取得成功: 予約数 {reservation_count} 名")
                         save_driver_diagnostics(driver, f'reservation_{yad_number}_{plan_code}_{room_code}_success', force=False)
                 except Exception as e:
-                        number_element = None
                         print("予約数が取得できませんでした")
                         print('診断情報: yad_number=' + str(yad_number) + ' plan_code=' + str(plan_code) + ' room_code=' + str(room_code))
                         save_driver_diagnostics(driver, f'reservation_{yad_number}_{plan_code}_{room_code}_not_found', force=True)
         finally:
                 driver.quit()
 
-        reservation_count = 0
-        if number_element is not None:
-                reservation_count = number_element.text.strip()
-
+        if reservation_count is not None:
                 d = {'宿番号': yad_number, 'エリア名': cryn['エリア名'], '宿名': cryn['宿名'], '予約件数':reservation_count, 'プランCD': plan_code, '部屋タイプCD': room_code, '予約日': str(reservation_date)}
                 print(d)
 
