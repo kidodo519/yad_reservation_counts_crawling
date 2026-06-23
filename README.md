@@ -64,6 +64,20 @@ cd dist
 ./yad_reservation_count_crawling
 ```
 
+
+## アクセス間隔とブラウザ起動
+
+検索結果ページと予約件数ページは、短時間の連続アクセスを避けるため、各 URL 取得前に `settings.access_interval_seconds` 秒だけ待機します。
+また、取得ごとに Selenium の Chrome ウインドウを新規起動し、ページ取得後に終了します。
+
+```yaml
+settings:
+  access_interval_seconds: 5
+  page_load_wait_seconds: 3
+```
+
+画面を表示して挙動を確認したい場合は、`settings.headless` を `false` にしてください。
+
 ## 診断ログの取得
 
 EC2 やタスクスケジューラー実行時に取得件数が不安定な場合は、`config.yaml` の `settings.diagnostics.enabled` を `true` にすると、exe と同じディレクトリ配下（既定は `diagnostics/`）に以下を保存できます。

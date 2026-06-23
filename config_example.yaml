@@ -31,6 +31,10 @@ settings:
   csv_download: false
   db_import: true
   headless: true
+  # 連続アクセスを避けるため、各ページ取得前に待機する秒数
+  access_interval_seconds: 5
+  # Seleniumでページ遷移後、HTML解析や要素取得前に待機する秒数
+  page_load_wait_seconds: 3
   diagnostics:
     # true にすると crawler.log と、取得失敗時の HTML/スクリーンショットを output_dir に保存します
     enabled: false
